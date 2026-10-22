@@ -321,7 +321,7 @@ class BCAttn:
             if (
                 causal and window_left < 0 and window_right < 0 and not self.softcap and
                 self.sinks is None and q_len <= 16 and block_rows == 16 and hd in (128, 256) and
-                kb == vb and kb in (0, 8) and abs(float(self.sm_scale) - hd ** -0.5) < 1e-6
+                kb == vb and (kb in (0, 8) or (kb == 6 and os.environ.get("EXL3_RDNA3_ATTN_Q6", "0") == "1")) and abs(float(self.sm_scale) - hd ** -0.5) < 1e-6
             ):
                 k_split = ext.rdna3_attn_split_kernel(kb, hd, q_len, kvh, group_size)
             if k_split is not None:

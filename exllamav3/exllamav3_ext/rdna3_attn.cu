@@ -679,7 +679,7 @@ void rdna3_attn_verify_q8_kernel
 typedef _Float16 v16h __attribute__((ext_vector_type(16)));
 typedef float v8f __attribute__((ext_vector_type(8)));
 
-template <int HD, int QL, int NKV, int GROUP>
+template <int QC, int HD, int QL, int NKV, int GROUP>
 __global__ __launch_bounds__(256)
 void rdna3_attn_verify_wmma_kernel
 (
@@ -789,7 +789,7 @@ void rdna3_attn_verify_wmma_kernel
     }
     for (int r = threadIdx.x; r < NRP; r += NTH) { mrow[r] = -INFINITY; lrow[r] = 0.0f; }
 
-    const float sm_scale = rsqrtf((float) HD) / 128.0f;
+    const float sm_scale = rsqrtf((float) HD) / float(1 << (QC - 1));
     const size_t row_elems = (size_t) NKV * HD;
     const int* bt = block_table + (size_t) batch * num_pages_per_seq;
     const uint8_t* kc = (const uint8_t*) k_cache;
@@ -810,7 +810,27 @@ void rdna3_attn_verify_wmma_kernel
                 const int tk = cc / CPR, ch = cc % CPR;
                 const int t = min(tb + tk, n_end - 1);
                 const int tr = bt[t / PAGE] * PAGE + (t % PAGE);
-                pr[i] = *(const uint4*) ((isv ? vc : kc) + ((size_t) tr * row_elems + (size_t) kvh * HD) + ch * 16);
+                if constexpr (QC == 8)
+                    pr[i] = *(const uint4*) ((isv ? vc : kc) + ((size_t) tr * row_elems + (size_t) kvh * HD) + ch * 16);
+                else
+                {
+                    // Q6: each group has four high-nibble words, then two low-two-bit words.
+                    // Expand into byte codes raw+96, so the existing byte-to-half path gives raw-32.
+                    const uint32_t* gp = (const uint32_t*) (isv ? vc : kc) +
+                        ((size_t) tr * NKV * G + kvh * G + ch / 2) * 6;
+                    const int base = (ch & 1) * 16;
+                    const uint32_t hi0 = gp[base / 8], hi1 = gp[base / 8 + 1];
+                    const uint32_t low = gp[4 + base / 16];
+                    uint32_t words[4] = {0, 0, 0, 0};
+                    #pragma unroll
+                    for (int j = 0; j < 16; ++j)
+                    {
+                        const uint32_t high = ((j < 8 ? hi0 : hi1) >> (4 * (j & 7))) & 15u;
+                        const uint32_t raw = (high << 2) | ((low >> (2 * j)) & 3u);
+                        words[j / 4] |= (raw + 96u) << (8 * (j & 3));
+                    }
+                    pr[i] = make_uint4(words[0], words[1], words[2], words[3]);
+                }
             }
         }
         #pragma unroll
@@ -1026,7 +1046,7 @@ void rdna3_attn_verify_wmma_kernel
                 const int qi = gr / GROUP, hl = gr % GROUP;
                 const int hb = hl / BH, r16 = (hl % BH) * BM + qi;
                 const size_t pbase = ((size_t) (bh * H_BLOCKS + hb) * num_splits + split);
-                partial_o[(pbase * BLOCK_ROWS + r16) * HD + (warp * DTW + k) * 16 + l16] = oacc[rt][k][v] * (1.0f / 128.0f);   // 8-bit grid step
+                partial_o[(pbase * BLOCK_ROWS + r16) * HD + (warp * DTW + k) * 16 + l16] = oacc[rt][k][v] * (1.0f / float(1 << (QC - 1)));   // 8-bit grid step
             }
     for (int gr = threadIdx.x; gr < NR; gr += NTH)
     {
@@ -1048,13 +1068,13 @@ static fp_rdna3_attn pick_ql(int ql)
     {
         switch (ql)
         {
-            case 2: return rdna3_attn_verify_wmma_kernel<HD, 2, NKV, GROUP>;
-            case 3: return rdna3_attn_verify_wmma_kernel<HD, 3, NKV, GROUP>;
-            case 4: return rdna3_attn_verify_wmma_kernel<HD, 4, NKV, GROUP>;
-            case 5: return rdna3_attn_verify_wmma_kernel<HD, 5, NKV, GROUP>;
-            case 6: return rdna3_attn_verify_wmma_kernel<HD, 6, NKV, GROUP>;
-            case 7: return rdna3_attn_verify_wmma_kernel<HD, 7, NKV, GROUP>;
-            case 8: return rdna3_attn_verify_wmma_kernel<HD, 8, NKV, GROUP>;
+            case 2: return rdna3_attn_verify_wmma_kernel<8, HD, 2, NKV, GROUP>;
+            case 3: return rdna3_attn_verify_wmma_kernel<8, HD, 3, NKV, GROUP>;
+            case 4: return rdna3_attn_verify_wmma_kernel<8, HD, 4, NKV, GROUP>;
+            case 5: return rdna3_attn_verify_wmma_kernel<8, HD, 5, NKV, GROUP>;
+            case 6: return rdna3_attn_verify_wmma_kernel<8, HD, 6, NKV, GROUP>;
+            case 7: return rdna3_attn_verify_wmma_kernel<8, HD, 7, NKV, GROUP>;
+            case 8: return rdna3_attn_verify_wmma_kernel<8, HD, 8, NKV, GROUP>;
         }
     }
     switch (ql)
@@ -1094,6 +1114,20 @@ std::shared_ptr<TritonKernel> rdna3_attn_split_kernel(int qc, int head_dim, int 
 {
     #ifdef __HIP_PLATFORM_AMD__
         fp_rdna3_attn k = nullptr;
+        // Experimental Q6 support is limited to the production verification geometry.
+        if (qc == 6 && head_dim == 256 && n_kv_heads == 4 && group == 6)
+        {
+            switch (q_len) {
+                case 2: k = rdna3_attn_verify_wmma_kernel<6, 256, 2, 4, 6>; break;
+                case 3: k = rdna3_attn_verify_wmma_kernel<6, 256, 3, 4, 6>; break;
+                case 4: k = rdna3_attn_verify_wmma_kernel<6, 256, 4, 4, 6>; break;
+                case 5: k = rdna3_attn_verify_wmma_kernel<6, 256, 5, 4, 6>; break;
+                case 6: k = rdna3_attn_verify_wmma_kernel<6, 256, 6, 4, 6>; break;
+                case 7: k = rdna3_attn_verify_wmma_kernel<6, 256, 7, 4, 6>; break;
+                case 8: k = rdna3_attn_verify_wmma_kernel<6, 256, 8, 4, 6>; break;
+                default: break;
+            }
+        }
         if (qc == 8 && head_dim == 256) k = pick_heads<8, 256>(n_kv_heads, group, q_len);
         if (qc == 0 && head_dim == 256) k = pick_heads<0, 256>(n_kv_heads, group, q_len);
         if (qc == 8 && head_dim == 128) k = pick_heads<8, 128>(n_kv_heads, group, q_len);
@@ -1101,7 +1135,7 @@ std::shared_ptr<TritonKernel> rdna3_attn_split_kernel(int qc, int head_dim, int 
         if (!k) return nullptr;
         hipFunction_t fn;
         cuda_check(hipGetFuncBySymbol(&fn, (const void*) k));
-        const int waves = q_len == 1 ? 4 : (qc == 8 && q_len <= 8) ? 8 : q_len;
+        const int waves = q_len == 1 ? 4 : ((qc == 8 || qc == 6) && q_len <= 8) ? 8 : q_len;
         return std::make_shared<TritonKernel>((void*) fn, std::string("rdna3_attn_decode_split"), waves, 0);
     #else
         return nullptr;
