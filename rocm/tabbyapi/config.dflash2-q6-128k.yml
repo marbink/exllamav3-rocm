@@ -1,0 +1,42 @@
+network:
+  host: 0.0.0.0
+  port: 8080
+  disable_auth: true
+  api_servers: [OAI]
+logging:
+  log_prompt: false
+  log_generation_params: false
+  log_requests: false
+model:
+  model_dir: /models
+  model_name: Qwen3.8-27B-EXL3-3.5bpw
+  backend: exllamav3
+  max_seq_len: 131072
+  cache_size: 131072
+  cache_mode: Q6
+  max_batch_size: 1
+  chunk_size: 2048
+  gpu_split_auto: false
+  use_dummy_models: true
+  dummy_model_names: [qwen3.8-27b]
+  inline_model_loading: false
+  vision: true
+  vision_offload: true
+  reasoning: true
+  reasoning_start_token: <think>
+  reasoning_end_token: </think>
+  tool_format: qwen3_coder
+  warmup: true
+draft_model:
+  draft_mode: model
+  draft_model_dir: /models
+  draft_model_name: Qwen3.8-27B-DFlash2-EXL3-5.0bpw
+  draft_cache_mode: Q4
+  draft_num_tokens: 7
+  dynamic_draft: false
+memory:
+  sysmem_recurrent_cache: 512
+  sysmem_kv_cache: 0
+  sysmem_multimodal_cache: 256
+sampling:
+  override_preset: safe_defaults

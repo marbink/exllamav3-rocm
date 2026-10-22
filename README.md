@@ -456,3 +456,12 @@ is single-stream at 4 bpw (330 tok/s is the 16-stream aggregate).
 - exllamav3 by turboderp and contributors, MIT License (see [LICENSE](LICENSE)); this fork keeps it.
 - TabbyAPI (AGPL-3.0) is not included; `rocm/tabbyapi/` only contains a patch and config files.
 - Models by the Qwen team, EXL3 quants and DFlash2 draft by Mia-AiLab (see their model cards for licenses).
+
+## Docker Compose with Q6 RDNA3 attention
+
+The root [`docker-compose.yml`](docker-compose.yml) and
+[128K Q6/DFlash2 config](rocm/tabbyapi/config.dflash2-q6-128k.yml) provide the
+local server profile with `EXL3_RDNA3_ATTN_Q6=1`. The server image is local and
+must be obtained separately; the extension must be compiled for its ABI.
+See the [Docker setup guide](rocm/tabbyapi/README.docker-q6.md) for prerequisites,
+image transfer, compilation, model downloads, and startup commands.

@@ -1,0 +1,48 @@
+name: qwen-exl3
+
+# Requires the local server image described in rocm/tabbyapi/README.docker-q6.md.
+services:
+  qwen38:
+    image: qwen-exl3-server:20261012
+    container_name: qwen38
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    devices:
+      - /dev/kfd
+      - /dev/dri
+
+    ipc: host
+    security_opt:
+      - seccomp=unconfined
+
+    environment:
+      HIP_VISIBLE_DEVICES: "0"
+      PYTHONPATH: /opt/exllamav3
+      EXL3_NOGRAPH: "mlp,gdn"
+      EXL3_RDNA3_ATTN_Q6: "1"
+      EXL3_EXPANDABLE_SEGMENTS: "0"
+      EXL3_LOAD_ARENA: "0"
+      HSA_ENABLE_SDMA: "0"
+      OMP_NUM_THREADS: "4"
+      TRITON_CACHE_DIR: /cache/triton
+
+    volumes:
+      - ./models:/models:ro
+      - ./rocm/tabbyapi/config.dflash2-q6-128k.yml:/app/config.yml:ro
+      - .:/opt/exllamav3:ro
+      - ./triton-cache:/cache/triton
+      - ./logs:/app/logs
+
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=4)"
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 10m
